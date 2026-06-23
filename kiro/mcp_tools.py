@@ -154,7 +154,7 @@ async def call_kiro_mcp_api(
             "Content-Type": "application/json"
         }
         
-        # Add profileArn if available (required by runtime.kiro.dev)
+        # profileArn required by runtime.kiro.dev/mcp
         from kiro.config import PROFILE_ARN
         profile_arn = auth_manager.profile_arn or PROFILE_ARN or ""
         if profile_arn:
