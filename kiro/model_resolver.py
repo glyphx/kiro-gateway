@@ -43,7 +43,7 @@ if TYPE_CHECKING:
 
 # Valid model IDs accepted by runtime.{region}.kiro.dev
 # Generated from FALLBACK_MODELS to maintain single source of truth
-from kiro.config import FALLBACK_MODELS
+from kiro.config import FALLBACK_MODELS, BEDROCK_MODELS
 
 VALID_RUNTIME_MODEL_IDS: set = {model["modelId"] for model in FALLBACK_MODELS}
 
@@ -384,10 +384,13 @@ class ModelResolver:
         """
         # Start with cache models
         models = set(self.cache.get_all_model_ids())
-        
+
         # Add hidden model display names (they use dot format)
         models.update(self.hidden_models.keys())
-        
+
+        # Add Bedrock-routed models (always available regardless of Kiro plan)
+        models.update(BEDROCK_MODELS.keys())
+
         # Remove models that should be hidden from list
         models -= self.hidden_from_list
         

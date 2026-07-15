@@ -35,6 +35,7 @@ from fastapi.security import APIKeyHeader
 from loguru import logger
 
 from kiro.config import PROXY_API_KEY, PROFILE_ARN
+from kiro.config import BEDROCK_MODELS, BEDROCK_REGION
 from kiro.models_anthropic import (
     AnthropicMessagesRequest,
     AnthropicCountTokensRequest,
@@ -42,6 +43,7 @@ from kiro.models_anthropic import (
     AnthropicErrorResponse,
     AnthropicErrorDetail,
 )
+from kiro.model_resolver import normalize_model_name
 from kiro.auth import KiroAuthManager, AuthType
 from kiro.cache import ModelInfoCache
 from kiro.converters_anthropic import anthropic_to_kiro
@@ -157,7 +159,25 @@ async def messages(
     from kiro.truncation_state import get_tool_truncation, get_content_truncation
     from kiro.truncation_recovery import generate_truncation_tool_result, generate_truncation_user_message
     from kiro.models_anthropic import AnthropicMessage
-    
+
+    # Extract system-role messages from the messages array into the system field
+    system_msgs = [msg for msg in request_data.messages if msg.role == "system"]
+    if system_msgs:
+        extracted_text = "\n".join(
+            msg.content if isinstance(msg.content, str) else
+            " ".join(b.get("text", "") if isinstance(b, dict) else getattr(b, "text", "") for b in msg.content)
+            for msg in system_msgs
+        )
+        if request_data.system:
+            existing = request_data.system if isinstance(request_data.system, str) else " ".join(
+                b.get("text", "") if isinstance(b, dict) else getattr(b, "text", "") for b in request_data.system
+            )
+            request_data.system = existing + "\n" + extracted_text
+        else:
+            request_data.system = extracted_text
+        request_data.messages = [msg for msg in request_data.messages if msg.role != "system"]
+        logger.debug(f"Extracted {len(system_msgs)} system message(s) from messages array")
+
     modified_messages = []
     tool_results_modified = 0
     content_notices_added = 0
@@ -309,6 +329,91 @@ async def messages(
                 logger.info("Detected native Anthropic web_search (Path A), routing to MCP API")
                 return await handle_native_web_search(request, request_data, auth_manager, api_format="anthropic")
     
+    # ==============================================================================
+    # Bedrock Bypass: Route configured models directly to AWS Bedrock
+    # ==============================================================================
+
+    normalized_model = normalize_model_name(request_data.model)
+    bedrock_profile_arn = BEDROCK_MODELS.get(normalized_model)
+
+    if bedrock_profile_arn:
+        logger.info(f"Bedrock bypass: routing {request_data.model} (normalized: {normalized_model}) to Bedrock")
+
+        from kiro.bedrock_client import BedrockClient
+        from kiro.bedrock_streaming import stream_bedrock_to_anthropic_sse, collect_bedrock_response
+
+        body = {
+            "anthropic_version": "bedrock-2023-05-31",
+            "max_tokens": request_data.max_tokens,
+            "messages": [msg.model_dump(exclude_none=True) for msg in request_data.messages],
+        }
+        if request_data.system:
+            if isinstance(request_data.system, list):
+                body["system"] = [b.model_dump() if hasattr(b, "model_dump") else b for b in request_data.system]
+            else:
+                body["system"] = request_data.system
+        if request_data.tools:
+            body["tools"] = [tool.model_dump(exclude_none=True) for tool in request_data.tools]
+        if request_data.thinking:
+            body["thinking"] = request_data.thinking
+        if request_data.temperature is not None:
+            body["temperature"] = request_data.temperature
+        if request_data.top_p is not None:
+            body["top_p"] = request_data.top_p
+        if request_data.top_k is not None:
+            body["top_k"] = request_data.top_k
+        if request_data.stop_sequences:
+            body["stop_sequences"] = request_data.stop_sequences
+        if request_data.tool_choice:
+            tc = request_data.tool_choice
+            body["tool_choice"] = tc.model_dump(exclude_none=True) if hasattr(tc, "model_dump") else tc
+
+        client = BedrockClient(region=BEDROCK_REGION)
+
+        try:
+            if request_data.stream:
+                chunks = client.invoke_stream(bedrock_profile_arn, body)
+
+                async def bedrock_stream_wrapper():
+                    try:
+                        async for sse_line in stream_bedrock_to_anthropic_sse(chunks):
+                            yield sse_line
+                    except Exception as e:
+                        logger.error(f"Bedrock streaming error: {e}")
+                        error_event = f'event: error\ndata: {json.dumps({"type": "error", "error": {"type": "api_error", "message": str(e)}})}\n\n'
+                        yield error_event
+                    finally:
+                        logger.info("HTTP 200 - POST /v1/messages (bedrock streaming) - completed")
+
+                return StreamingResponse(
+                    bedrock_stream_wrapper(),
+                    media_type="text/event-stream",
+                    headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
+                )
+            else:
+                chunks = client.invoke_stream(bedrock_profile_arn, body)
+                response_data = await collect_bedrock_response(chunks)
+                logger.info("HTTP 200 - POST /v1/messages (bedrock non-streaming) - completed")
+                return JSONResponse(content=response_data)
+
+        except Exception as e:
+            logger.error(f"Bedrock invocation error: {e}")
+            error_msg = str(e)
+            status_code = 500
+            if "ThrottlingException" in error_msg or "TooManyRequestsException" in error_msg:
+                status_code = 429
+            elif "ValidationException" in error_msg:
+                status_code = 400
+            elif "AccessDeniedException" in error_msg:
+                status_code = 403
+            return JSONResponse(
+                status_code=status_code,
+                content={
+                    "type": "error",
+                    "error": {"type": "api_error", "message": f"Bedrock error: {error_msg}"},
+                },
+            )
+
     # ==============================================================================
     # Account System: Account System Failover or Legacy Mode
     # ==============================================================================
