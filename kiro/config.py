@@ -263,6 +263,22 @@ MODEL_ALIASES: Dict[str, str] = {
 HIDDEN_FROM_LIST: List[str] = ["auto"]
 
 # ==================================================================================================
+# Bedrock Bypass Configuration
+# ==================================================================================================
+
+# Models routed directly to AWS Bedrock instead of the Kiro API.
+# Format: "normalized_model_id" -> "inference_profile_arn"
+# When a request targets one of these models, the gateway bypasses Kiro entirely
+# and sends a native Anthropic Messages API request to Bedrock.
+BEDROCK_MODELS: Dict[str, str] = {
+    "claude-opus-4.8": "arn:aws:bedrock:us-east-1:906177868613:application-inference-profile/nuoce3kvivft",
+    "claude-sonnet-5": "arn:aws:bedrock:us-east-1:906177868613:application-inference-profile/vu5u319yoq2t",
+}
+
+# AWS region for Bedrock API calls
+BEDROCK_REGION: str = os.getenv("BEDROCK_REGION", "us-east-1")
+
+# ==================================================================================================
 # Fallback Models Configuration (DNS Failure Recovery)
 # ==================================================================================================
 
@@ -281,7 +297,7 @@ FALLBACK_MODELS: List[Dict[str, str]] = [
     {"modelId": "claude-haiku-4.5"},
     {"modelId": "claude-opus-4.5"},
     {"modelId": "claude-opus-4.6"},
-    {"modelId": "claude-opus-4.7"},
+    {"modelId": "claude-opus-4.8"},
     {"modelId": "deepseek-3.2"},
     {"modelId": "glm-5"},
     {"modelId": "minimax-m2.1"},
