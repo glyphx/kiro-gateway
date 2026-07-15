@@ -45,6 +45,7 @@ class TextContentBlock(BaseModel):
 
     type: Literal["text"] = "text"
     text: str
+    cache_control: Optional[Dict[str, Any]] = None
 
 
 class ThinkingContentBlock(BaseModel):
@@ -76,6 +77,7 @@ class ToolUseContentBlock(BaseModel):
     id: str
     name: str
     input: Dict[str, Any]
+    cache_control: Optional[Dict[str, Any]] = None
 
 
 class ToolReferenceContentBlock(BaseModel):
